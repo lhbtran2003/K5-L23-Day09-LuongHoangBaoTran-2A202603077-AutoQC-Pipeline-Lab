@@ -40,5 +40,115 @@ from ..model_cache import get_preds  # noqa: F401
 
 
 def run(ds, cfg, preds=None):
-    # TODO
-    raise NotImplementedError("check second_opinion chưa làm")
+    settings = cfg["second_opinion"]
+    if preds is None:
+        preds = get_preds(ds, cfg, "checker")
+
+    issues = []
+    for image_path in ds.image_files():
+        stem = image_path.stem
+        if stem not in preds or not ds.label_path(stem).exists():
+            continue
+
+        image_size = ds.image_size(stem)
+        image_width, image_height = image_size if image_size is not None else (0, 0)
+
+        # Keep original line numbers while collecting only rows accepted by valid_boxes.
+        label_rows = []
+        for line_no, text in ds.read_label_lines(stem) or []:
+            try:
+                box = parse_yolo_line(text)
+            except ValueError:
+                continue
+            if 0 <= box[0] < len(ds.classes):
+                label_rows.append((line_no, box))
+
+        # Dataset.valid_boxes is the canonical list of valid annotations. Pairing it
+        # with label_rows preserves each row's original line number for FALSE_POS.
+        labels = ds.valid_boxes(stem)
+        if len(labels) != len(label_rows):
+            # Defensive fallback in case a future Dataset implementation changes
+            # valid_boxes filtering: use only the rows we successfully parsed here.
+            labels = [box for _, box in label_rows]
+        else:
+            label_rows = [(line_no, box) for (line_no, _), box in zip(label_rows, labels)]
+
+        raw_predictions = preds.get(stem) or []
+        parsed_predictions = []
+        for row in raw_predictions:
+            try:
+                if len(row) != 6:
+                    continue
+                class_id = int(row[0])
+                confidence, cx, cy, width, height = map(float, row[1:])
+                prediction = (class_id, confidence, cx, cy, width, height)
+            except (TypeError, ValueError):
+                continue
+            parsed_predictions.append(prediction)
+
+        candidates_for_review = []
+        for prediction in parsed_predictions:
+            class_id, confidence, cx, cy, width, height = prediction
+            if confidence < settings["conf"]:
+                continue
+            area_px = width * image_width * height * image_height
+            if image_size is None or area_px < settings["min_area_px"]:
+                continue
+            candidates_for_review.append(prediction)
+
+        for prediction in candidates_for_review:
+            class_id, confidence, cx, cy, width, height = prediction
+            pred_box = (cx, cy, width, height)
+            overlaps = [
+                (iou_xywh(pred_box, label[1:]), label[0])
+                for label in labels
+            ]
+            cands = [item for item in overlaps if item[0] >= settings["iou_missing"]]
+
+            if not cands:
+                issues.append(Issue(
+                    "second_opinion", WARN, "POSSIBLE_MISSING", stem,
+                    "model thấy vật nhưng nhãn không có box khớp",
+                    extra={"conf": confidence},
+                ))
+                continue
+
+            same_class = [iou for iou, label_class in cands if label_class == class_id]
+            if same_class:
+                best_iou = max(same_class)
+                if best_iou < settings["iou_loose"]:
+                    issues.append(Issue(
+                        "second_opinion", WARN, "POSSIBLE_LOOSE_BOX", stem,
+                        f"box nhãn cùng lớp có IoU thấp ({best_iou:.4f})",
+                        extra={"conf": confidence, "iou": best_iou},
+                    ))
+                continue
+
+            best_other_iou = max(iou for iou, _ in cands)
+            if best_other_iou >= settings["iou_match"]:
+                issues.append(Issue(
+                    "second_opinion", WARN, "POSSIBLE_WRONG_CLASS", stem,
+                    f"vị trí khớp nhãn lớp khác (IoU {best_other_iou:.4f})",
+                    extra={"conf": confidence, "iou": best_other_iou},
+                ))
+
+        fp_predictions = [
+            prediction
+            for prediction in parsed_predictions
+            if prediction[1] >= settings["fp_conf"]
+        ]
+        for line_no, label in label_rows:
+            label_box = label[1:]
+            best_iou = max(
+                (iou_xywh(label_box, prediction[2:]) for prediction in fp_predictions),
+                default=0.0,
+            )
+            if best_iou < settings["iou_missing"]:
+                issues.append(Issue(
+                    "second_opinion", WARN, "POSSIBLE_FALSE_POS", stem,
+                    "box nhãn không khớp dự đoán nào của model",
+                    line=line_no,
+                    extra={"iou": best_iou},
+                ))
+
+    return issues

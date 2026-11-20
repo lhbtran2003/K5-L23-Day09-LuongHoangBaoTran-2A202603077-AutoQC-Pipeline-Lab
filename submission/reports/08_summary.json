@@ -1,0 +1,18 @@
+{
+  "verdict": {
+    "decision": "Hold",
+    "n_errors": 0,
+    "n_warn_images": 57,
+    "n_images": 193,
+    "warn_ratio": 0.2953,
+    "reasons": [
+      "Hold: 57/193 ảnh chưa review còn cảnh báo (tỷ lệ 29.5337%), đạt/vượt ngưỡng 10.0000%."
+    ]
+  },
+  "reviewed": 80,
+  "budget": 80,
+  "seconds": 7.8,
+  "exported": "/home/lilianna/K5-L23-Day09-LuongHoangBaoTran-2A202603077-AutoQC-Pipeline-Lab/submission/export/clean_v1",
+  "config_sha1": "5b0d9b293109fc1db8ffab44f74e6b3672a1ed18",
+  "review_sim_sha1": "7988ca22827f780a7043a2300490e679a1697154"
+}

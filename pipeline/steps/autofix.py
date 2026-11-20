@@ -35,5 +35,142 @@ from ..common import ERROR, parse_yolo_line  # noqa: F401
 
 
 def fix(ds, issues, cfg):
-    # TODO
-    raise NotImplementedError("autofix chưa làm")
+    drop_codes = {"BAD_FORMAT", "BAD_CLASS_ID", "BOX_ZERO", "DUP_BOX"}
+    remove_codes = {"LEAK_TEST", "CORRUPT_IMAGE", "BAD_SIZE"}
+    issues = [issue for issue in issues if issue.severity == ERROR]
+    fixes = []
+
+    # Xóa ảnh trước để các issue dòng nhãn cũ của ảnh đó không gây lỗi.
+    remove_images = {
+        issue.image
+        for issue in issues
+        if issue.code.startswith("DUP_IMAGE_") or issue.code in remove_codes
+    }
+    for stem in sorted(remove_images):
+        image_path = ds.image_path(stem)
+        label_path = ds.label_path(stem)
+        if image_path is not None:
+            image_path.unlink(missing_ok=True)
+        label_path.unlink(missing_ok=True)
+        fixes.append({
+            "image": stem,
+            "line": None,
+            "action": "remove_image",
+            "before": "ảnh và file nhãn trong ds",
+            "after": "đã xóa khỏi ds",
+        })
+
+    # Ảnh thiếu nhãn được chuyển cho người; không tạo file nhãn giả.
+    missing_labels = sorted({issue.image for issue in issues if issue.code == "MISSING_LABEL_FILE"})
+    for stem in missing_labels:
+        if stem not in remove_images:
+            fixes.append({
+                "image": stem,
+                "line": None,
+                "action": "needs_label",
+                "before": "(không có file)",
+                "after": "chuyển người gán",
+            })
+
+    # Sửa data.yaml một lần dù có nhiều issue cùng báo tên lớp.
+    if any(issue.code == "BAD_CLASS_NAME" for issue in issues):
+        before = ds.yaml_path.read_text(encoding="utf-8") if ds.yaml_path.exists() else ""
+        data = yaml.safe_load(before) or {}
+        data["names"] = list(cfg["classes"])
+        after = yaml.safe_dump(data, allow_unicode=True, sort_keys=False)
+        if before != after:
+            ds.yaml_path.write_text(after, encoding="utf-8")
+        fixes.append({
+            "image": "data.yaml",
+            "line": None,
+            "action": "rename_classes",
+            "before": before,
+            "after": after,
+        })
+
+    # Gom issue theo file và số dòng gốc; mỗi file chỉ được ghi lại một lần.
+    line_issues = defaultdict(list)
+    for issue in issues:
+        if issue.image in remove_images or issue.line is None:
+            continue
+        if issue.code in drop_codes or issue.code == "BOX_OUT_OF_IMAGE":
+            line_issues[issue.image].append(issue)
+
+    for stem in sorted(line_issues):
+        path = ds.label_path(stem)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8")
+        original_lines = text.splitlines()
+        issues_by_line = defaultdict(list)
+        for issue in line_issues[stem]:
+            issues_by_line[issue.line].append(issue)
+
+        output_lines = []
+        changed = False
+        for line_no, before in enumerate(original_lines, 1):
+            line_issues_here = issues_by_line.get(line_no, [])
+            if not line_issues_here:
+                output_lines.append(before)
+                continue
+
+            codes = {issue.code for issue in line_issues_here}
+            if codes & drop_codes:
+                changed = True
+                fixes.append({
+                    "image": stem,
+                    "line": line_no,
+                    "action": "drop_line",
+                    "before": before,
+                    "after": "đã xóa dòng",
+                })
+                continue
+
+            # BOX_OUT_OF_IMAGE: cắt phần giao của box với vùng ảnh [0, 1].
+            try:
+                class_id, cx, cy, width, height = parse_yolo_line(before)
+            except ValueError:
+                output_lines.append(before)
+                continue
+
+            left = max(0.0, cx - width / 2)
+            right = min(1.0, cx + width / 2)
+            top = max(0.0, cy - height / 2)
+            bottom = min(1.0, cy + height / 2)
+            if right <= left or bottom <= top:
+                changed = True
+                fixes.append({
+                    "image": stem,
+                    "line": line_no,
+                    "action": "drop_line",
+                    "before": before,
+                    "after": "đã xóa box nằm ngoài ảnh",
+                })
+                continue
+
+            clipped = (
+                class_id,
+                (left + right) / 2,
+                (top + bottom) / 2,
+                right - left,
+                bottom - top,
+            )
+            after = " ".join(f"{value:.8g}" for value in clipped)
+            output_lines.append(after)
+            changed = changed or after != before
+            if after != before:
+                fixes.append({
+                    "image": stem,
+                    "line": line_no,
+                    "action": "clip_box",
+                    "before": before,
+                    "after": after,
+                })
+
+        if changed:
+            result = "\n".join(output_lines)
+            if text.endswith(("\n", "\r")):
+                result += "\n"
+            path.write_text(result, encoding="utf-8")
+
+    return fixes
