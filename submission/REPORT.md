@@ -31,6 +31,10 @@ Chưa train: ghi "chưa chạy" và lý do, rồi bỏ qua phần còn lại c�
 TODO(học viên): chênh mAP50 (clean − raw) so với **độ lệch chuẩn giữa các seed**; kết luận **trung thực** (nằm trong nhiễu thì nói là chưa kết luận được); ≥ 2 giả thuyết giải thích (ảnh trùng/rò rỉ test trong `raw`, nhãn máy còn lại trong `clean`, test chỉ 100 ảnh…) và cách kiểm.
 
 ## 6. Quyết định và ghi chú AI
-TODO(học viên): (a) quyết định cuối; nếu Hold/Rework cần làm gì để thành Release? (b) Dùng AI viết code? Ghi 3 dòng: prompt chính, cách bạn kiểm code AI, 1 lần AI sai. Không dùng: ghi "không dùng".
+TODO(học viên): quyết định cuối; nếu Hold/Rework cần làm gì để thành Release?
+
+- Prompt chính: Viết `label_format.py` để kiểm tra 7 mã lỗi YOLO, mỗi mã có hàm riêng; gom lỗi thành `list[Issue]`, bắt `ValueError` khi parse, bỏ qua kiểm hình học nếu dòng có `BAD_FORMAT`, `BAD_CLASS_ID` hoặc `BOX_ZERO`, dùng `common.py` và lấy ngưỡng từ `cfg["label_format"]`.
+- Cách kiểm: Đọc lại code và đối chiếu với docstring, `common.py` và các ca trong `tests/test_label_format.py`; diagnostics không báo lỗi. Chạy `python3 -m pytest tests/test_label_format.py -q`: **14 passed**. Chưa thử thêm trên lỗi chèn sẵn.
+- Lỗi AI: Trong 14 unit test hiện có chưa phát hiện lỗi; chưa kiểm trên lỗi chèn sẵn nên chưa thể kết luận code không còn sai sót.
 
 *(Thưởng +2, tùy chọn)* CVAT: lọc `width < 20`, ảnh/số box khớp, đối chiếu `BOX_TINY` (xem docs/CVAT_FILTER.md), 1 câu về `can_review`.
